@@ -1,484 +1,499 @@
-// ================================================================= //
-// Google Apps Script for Gradebook System (Complete & Improved)     //
-// -- Security, Performance, and Stability Enhancements by Gemini -- //
-// ================================================================= //
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบบันทึกคะแนน</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sarabun:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Sarabun', 'Inter', sans-serif; }
+        .view { display: none; }
+        .view.active { display: block; }
+        /* Custom style for grade input */
+        .grade-input {
+            width: 60px;
+            text-align: center;
+            padding: 4px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            transition: all 0.2s;
+        }
+        .grade-input:focus {
+            border-color: #4f46e5;
+            box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.3);
+            outline: none;
+        }
+        .grade-input.saving {
+            background-color: #fefce8; /* yellow-100 */
+        }
+        .grade-input.saved {
+            background-color: #f0fdf4; /* green-50 */
+            border-color: #16a34a; /* green-600 */
+        }
+        /* Custom Modal Styles */
+        #custom-modal {
+            transition: opacity 0.3s ease;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
 
-// --- Global Variables & Constants ---
-// !! IMPORTANT: Replace with your actual Spreadsheet ID
-const SPREADSHEET_ID = '1eLYd5tY09SFOSJnJtpeVRtHcv3N9fByVP1cKxo-nrNc'; 
-// !! IMPORTANT: Set your own unique and secret key for password hashing
-const SECRET_KEY = 'iy9oLiumokk160925213203'; 
-
-// Sheet Names
-const SHEET_USERS = 'Users';
-const SHEET_COURSES = 'Courses';
-const SHEET_GRADES = 'Grades';
-const SHEET_ASSIGNMENTS = 'Assignments';
-
-// Global spreadsheet object to avoid re-opening
-let ss;
-
-// --- Web App Entry Points & Core Handlers ---
-
-/**
- * Handles GET requests.
- * @param {Object} e - The event parameter.
- */
-function doGet(e) {
-  return handleRequest(e);
-}
-
-/**
- * Handles POST requests.
- * @param {Object} e - The event parameter.
- */
-function doPost(e) {
-  try {
-    const postData = JSON.parse(e.postData.contents);
-    e.parameter = { ...e.parameter, ...postData };
-    return handleRequest(e);
-  } catch (err) {
-    return createResponse(false, 'Invalid JSON payload in request body.', null);
-  }
-}
-
-/**
- * Main request handler that routes actions to the appropriate functions.
- * @param {Object} e - The event parameter containing the action and other parameters.
- */
-function handleRequest(e) {
-  const params = e.parameter;
-  const action = params.action;
-
-  if (!initialize()) {
-    return createResponse(false, 'Failed to initialize the system. Check Spreadsheet ID.', null);
-  }
-
-  try {
-    let result;
-    switch (action) {
-      // User Management
-      case 'login':           result = handleLogin(params.username, params.password); break;
-      case 'getUsers':        result = getUsers(params.role); break;
-      case 'addUser':         result = addUser(params); break;
-      
-      // Course Management
-      case 'getCourses':      result = getCourses(params.teacherId); break;
-      case 'addCourse':       result = addCourse(params); break;
-      
-      // Assignment Management
-      case 'getAssignments':  result = getAssignments(params.courseId); break;
-      case 'addAssignment':   result = addAssignment(params); break;
-      
-      // Grade Management
-      case 'recordGrade':     result = recordGrade(params); break;
-      case 'getStudentGrades':result = getStudentGrades(params.studentId, params.courseId); break;
-      case 'getCourseGrades': result = getCourseGrades(params.courseId); break;
-      
-      // Reporting
-      case 'generateReport':  result = generateReport(params); break;
-
-      default:
-        result = { success: false, message: 'Invalid action specified.' };
-    }
-    return createResponse(result.success, result.message, result.data);
-  } catch (error) {
-    Logger.log(`Error in handleRequest [Action: ${action}]: ${error.toString()}\n${error.stack}`);
-    return createResponse(false, 'An unexpected error occurred: ' + error.toString(), null);
-  }
-}
-
-// --- Initialization & Setup ---
-
-function initialize() {
-  try {
-    if (ss) return true;
-    ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-    setupSheetHeaders();
-    return true;
-  } catch (error) {
-    Logger.log('Error initializing spreadsheet: ' + error.toString());
-    return false;
-  }
-}
-
-/**
- * [MAJOR CHANGE] Creates sheets if they don't exist and sets up their headers.
- * Added 'CompositeKey' to the Grades sheet for performance.
- */
-function setupSheetHeaders() {
-  const sheetsToSetup = {
-    [SHEET_USERS]: ['ID', 'Username', 'PasswordHash', 'FullName', 'Role', 'Email', 'CreatedAt', 'LastLogin'],
-    [SHEET_COURSES]: ['CourseID', 'CourseCode', 'CourseName', 'TeacherID', 'Description', 'Term', 'Year', 'CreatedAt'],
-    // Added 'CompositeKey' as the second column for efficient lookups.
-    [SHEET_GRADES]: ['ID', 'CompositeKey', 'StudentID', 'CourseID', 'AssignmentID', 'Score', 'MaxScore', 'RecordedBy', 'RecordedAt', 'Comments'],
-    [SHEET_ASSIGNMENTS]: ['AssignmentID', 'CourseID', 'Title', 'Description', 'Type', 'MaxScore', 'DueDate', 'CreatedAt']
-  };
-
-  for (const sheetName in sheetsToSetup) {
-    let sheet = ss.getSheetByName(sheetName);
-    if (!sheet) {
-      sheet = ss.insertSheet(sheetName);
-    }
-    if (sheet.getLastRow() === 0) {
-      sheet.appendRow(sheetsToSetup[sheetName]);
-      sheet.setFrozenRows(1);
-    }
-  }
-}
-
-// --- Utility & Security Functions ---
-
-function createResponse(success, message, data = null) {
-  const response = { success, message, data, timestamp: new Date().toISOString() };
-  return ContentService.createTextOutput(JSON.stringify(response)).setMimeType(ContentService.MimeType.JSON);
-}
-
-function hashPassword(password) {
-  if (!password || !SECRET_KEY || SECRET_KEY === 'YOUR_SUPER_SECRET_KEY_CHANGE_THIS') {
-     throw new Error("SECRET_KEY is not configured. Please set a strong secret key in the script.");
-  }
-  const toHash = password + SECRET_KEY;
-  const hashBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, toHash);
-  return hashBytes.map(byte => ('0' + (byte & 0xFF).toString(16)).slice(-2)).join('');
-}
-
-function getSheetDataAsObjects(sheetName) {
-    const cache = CacheService.getScriptCache();
-    const cachedData = cache.get(sheetName);
-    if (cachedData) {
-        return JSON.parse(cachedData);
-    }
-    const sheet = ss.getSheetByName(sheetName);
-    if (!sheet || sheet.getLastRow() < 2) return [];
+    <!-- Global Loader -->
+    <div id="loader" class="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center z-50" style="display: none;">
+        <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-white"></div>
+    </div>
     
-    const data = sheet.getDataRange().getValues();
-    const headers = data.shift();
-    const objects = data.map(row => {
-        const obj = {};
-        headers.forEach((header, index) => {
-            obj[header] = row[index];
+    <!-- Custom Modal for Alerts -->
+    <div id="custom-modal" class="fixed inset-0 bg-gray-900 bg-opacity-60 flex items-center justify-center z-50 hidden" >
+        <div class="bg-white rounded-lg shadow-xl p-6 w-11/12 md:w-1/3 transform transition-all scale-95 opacity-0" id="modal-content">
+            <h3 id="modal-title" class="text-xl font-bold text-gray-800 mb-4">ข้อความ</h3>
+            <p id="modal-message" class="text-gray-700 mb-6"></p>
+            <button id="modal-close-button" class="w-full bg-indigo-600 text-white py-2 rounded-lg hover:bg-indigo-700 transition duration-300 font-semibold">ตกลง</button>
+        </div>
+    </div>
+
+
+    <!-- Main Container -->
+    <div class="container mx-auto p-4 md:p-6">
+
+        <!-- Login View -->
+        <div id="login-view" class="view max-w-md mx-auto bg-white p-8 rounded-xl shadow-lg">
+            <h1 class="text-3xl font-bold text-center mb-2 text-indigo-600">ระบบบันทึกคะแนน</h1>
+            <p class="text-center text-gray-500 mb-6">กรุณาเข้าสู่ระบบเพื่อใช้งาน</p>
+            <form id="login-form">
+                <div class="mb-4">
+                    <label for="username" class="block text-gray-700 font-medium mb-2">ชื่อผู้ใช้</label>
+                    <input type="text" id="username" name="username" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" required>
+                </div>
+                <div class="mb-6">
+                    <label for="password" class="block text-gray-700 font-medium mb-2">รหัสผ่าน</label>
+                    <input type="password" id="password" name="password" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" required>
+                </div>
+                <button type="submit" class="w-full bg-indigo-600 text-white py-2 rounded-lg hover:bg-indigo-700 transition duration-300 font-semibold">เข้าสู่ระบบ</button>
+            </form>
+            <p id="login-error" class="text-red-500 text-center mt-4"></p>
+        </div>
+
+        <!-- Main App View (Dashboard and Admin) -->
+        <div id="app-view" class="view">
+            <header class="flex flex-wrap justify-between items-center mb-6 bg-white p-4 rounded-xl shadow">
+                <div>
+                    <h1 id="header-title" class="text-3xl font-bold text-indigo-600">Dashboard</h1>
+                    <p id="user-greeting" class="text-gray-600"></p>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <!-- [NEW] Admin panel button, hidden by default -->
+                    <button id="admin-panel-button" class="hidden bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition font-medium">จัดการผู้ใช้</button>
+                    <button id="dashboard-button" class="hidden bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300 transition font-medium">Dashboard</button>
+                    <button id="logout-button" class="bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition font-medium">ออกจากระบบ</button>
+                </div>
+            </header>
+
+            <!-- Dashboard Content -->
+            <main id="dashboard-content">
+                <div class="bg-white p-6 rounded-xl shadow-lg mb-6">
+                    <h2 class="text-2xl font-bold mb-4">รายวิชาของคุณ</h2>
+                    <div id="courses-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+                </div>
+                <div id="gradebook-container" class="hidden">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 id="gradebook-title" class="text-2xl font-bold">ตารางคะแนน</h2>
+                        <button id="back-to-courses" class="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300 transition font-medium">&larr; กลับไปหน้ารายวิชา</button>
+                    </div>
+                    <div class="overflow-x-auto bg-white p-2 rounded-xl shadow-lg">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead id="gradebook-head" class="bg-gray-50"></thead>
+                            <tbody id="gradebook-body" class="bg-white divide-y divide-gray-200"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </main>
+            
+            <!-- [NEW] Admin Panel Content -->
+            <main id="admin-content" class="hidden">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <!-- Add User Form -->
+                    <div class="lg:col-span-1 bg-white p-6 rounded-xl shadow-lg">
+                        <h2 class="text-2xl font-bold mb-4">เพิ่มผู้ใช้ใหม่</h2>
+                        <form id="add-user-form">
+                            <div class="mb-4">
+                                <label for="new-username" class="block text-gray-700 font-medium mb-2">ชื่อผู้ใช้ (Username)</label>
+                                <input type="text" id="new-username" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" required>
+                            </div>
+                            <div class="mb-4">
+                                <label for="new-password" class="block text-gray-700 font-medium mb-2">รหัสผ่าน</label>
+                                <input type="password" id="new-password" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" required>
+                            </div>
+                            <div class="mb-4">
+                                <label for="new-fullname" class="block text-gray-700 font-medium mb-2">ชื่อ-สกุล</label>
+                                <input type="text" id="new-fullname" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" required>
+                            </div>
+                             <div class="mb-4">
+                                <label for="new-email" class="block text-gray-700 font-medium mb-2">อีเมล (ถ้ามี)</label>
+                                <input type="email" id="new-email" class="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                            </div>
+                            <div class="mb-6">
+                                <label for="new-role" class="block text-gray-700 font-medium mb-2">บทบาท</label>
+                                <select id="new-role" class="w-full px-4 py-2 border rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500" required>
+                                    <option value="student">นักเรียน (student)</option>
+                                    <option value="teacher">ครู (teacher)</option>
+                                    <option value="admin">ผู้ดูแลระบบ (admin)</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition duration-300 font-semibold">เพิ่มผู้ใช้</button>
+                        </form>
+                    </div>
+                    <!-- User List -->
+                    <div class="lg:col-span-2 bg-white p-6 rounded-xl shadow-lg">
+                        <h2 class="text-2xl font-bold mb-4">รายชื่อผู้ใช้ในระบบ</h2>
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="p-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ชื่อ-สกุล</th>
+                                        <th class="p-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Username</th>
+                                        <th class="p-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">บทบาท</th>
+                                        <th class="p-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">อีเมล</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="user-list-body" class="bg-white divide-y divide-gray-200">
+                                    <!-- User rows will be inserted here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        // ================================================================= //
+        // Frontend JavaScript for Gradebook System                          //
+        // ================================================================= //
+        
+        // !! IMPORTANT: Replace with your deployed Web App URL
+        const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbzge_DQS9jpjDZeZhXbadOu6_aLp23yUeLhNYxesK2GZNkRSuS9tBcuFLYzvi4beAIz/exec';
+
+        // --- DOM Elements ---
+        const loginView = document.getElementById('login-view');
+        const appView = document.getElementById('app-view');
+        const dashboardContent = document.getElementById('dashboard-content');
+        const adminContent = document.getElementById('admin-content');
+        const loader = document.getElementById('loader');
+        const customModal = document.getElementById('custom-modal');
+        const modalTitle = document.getElementById('modal-title');
+        const modalContent = document.getElementById('modal-content');
+        const modalMessage = document.getElementById('modal-message');
+        const modalCloseButton = document.getElementById('modal-close-button');
+        
+        // --- State Management ---
+        let currentUser = null;
+        let currentCourse = null;
+
+        // --- Modal Functions ---
+        function showModal(message, title = 'ข้อความ') {
+            modalTitle.textContent = title;
+            modalMessage.textContent = message;
+            modalTitle.classList.toggle('text-red-600', title.includes('ผิดพลาด'));
+            customModal.classList.remove('hidden');
+            setTimeout(() => { modalContent.classList.remove('scale-95', 'opacity-0'); }, 10);
+        }
+
+        function hideModal() {
+            modalContent.classList.add('scale-95', 'opacity-0');
+            setTimeout(() => { customModal.classList.add('hidden'); }, 300);
+        }
+        modalCloseButton.addEventListener('click', hideModal);
+        customModal.addEventListener('click', (e) => { if (e.target === customModal) hideModal(); });
+
+        // --- API Call Helper ---
+        async function callApi(action, payload = {}) {
+            if (!WEB_APP_URL || WEB_APP_URL === 'https://script.google.com/macros/s/AKfycbzge_DQS9jpjDZeZhXbadOu6_aLp23yUeLhNYxesK2GZNkRSuS9tBcuFLYzvi4beAIz/exec') {
+                showModal('กรุณาตั้งค่า WEB_APP_URL ในไฟล์ HTML ของคุณ! คุณต้องนำ URL ที่ได้จากการ Deploy สคริปต์ .gs มาใส่ในตัวแปร WEB_APP_URL ก่อนใช้งาน', 'ตั้งค่าไม่สำเร็จ');
+                return null;
+            }
+            showLoader(true);
+            try {
+                const response = await fetch(WEB_APP_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action, ...payload })
+                });
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const result = await response.json();
+                if (!result.success) throw new Error(result.message);
+                return result.data;
+            } catch (error) {
+                console.error(`API Error on action '${action}':`, error);
+                showModal(`เกิดข้อผิดพลาด: ${error.message}`, 'เกิดข้อผิดพลาด');
+                return null;
+            } finally {
+                showLoader(false);
+            }
+        }
+
+        // --- UI Helper Functions ---
+        function showView(viewId) {
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            document.getElementById(viewId).classList.add('active');
+        }
+
+        function showLoader(show) {
+            loader.style.display = show ? 'flex' : 'none';
+        }
+
+        // --- Authentication ---
+        function setupAuth() {
+            const loginForm = document.getElementById('login-form');
+            const logoutButton = document.getElementById('logout-button');
+
+            loginForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const username = e.target.username.value;
+                const password = e.target.password.value;
+                const loginError = document.getElementById('login-error');
+                loginError.textContent = '';
+
+                const data = await callApi('login', { username, password });
+                if (data) {
+                    currentUser = data;
+                    localStorage.setItem('currentUser', JSON.stringify(currentUser));
+                    initializeApp();
+                } else {
+                    if (!document.getElementById('custom-modal').classList.contains('hidden')) {
+                         loginError.textContent = 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง';
+                    }
+                }
+            });
+
+            logoutButton.addEventListener('click', () => {
+                currentUser = null;
+                localStorage.removeItem('currentUser');
+                showView('login-view');
+            });
+
+            const savedUser = localStorage.getItem('currentUser');
+            if (savedUser) {
+                currentUser = JSON.parse(savedUser);
+                initializeApp();
+            } else {
+                showView('login-view');
+            }
+        }
+
+        // --- App Initialization ---
+        async function initializeApp() {
+            if (!currentUser) return;
+            showView('app-view');
+            document.getElementById('user-greeting').textContent = `สวัสดี, ${currentUser.fullName}`;
+            
+            // [NEW] Show admin button if user is an admin
+            const adminButton = document.getElementById('admin-panel-button');
+            if (currentUser.role === 'admin') {
+                adminButton.classList.remove('hidden');
+            } else {
+                adminButton.classList.add('hidden');
+            }
+            
+            // Default to dashboard view
+            showDashboard();
+        }
+        
+        // --- [NEW] Admin Panel ---
+        async function showAdminPanel() {
+            document.getElementById('header-title').textContent = 'จัดการผู้ใช้';
+            dashboardContent.classList.add('hidden');
+            adminContent.classList.remove('hidden');
+            document.getElementById('dashboard-button').classList.remove('hidden');
+            document.getElementById('admin-panel-button').classList.add('hidden');
+            
+            await loadUserList();
+        }
+        
+        async function loadUserList() {
+            const users = await callApi('getUsers', {});
+            const userListBody = document.getElementById('user-list-body');
+            userListBody.innerHTML = '';
+            if (users) {
+                users.forEach(user => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td class="p-3 text-sm text-gray-900">${user.FullName}</td>
+                        <td class="p-3 text-sm text-gray-500">${user.Username}</td>
+                        <td class="p-3 text-sm text-gray-500">${user.Role}</td>
+                        <td class="p-3 text-sm text-gray-500">${user.Email || ''}</td>
+                    `;
+                    userListBody.appendChild(row);
+                });
+            }
+        }
+        
+        document.getElementById('add-user-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const payload = {
+                username: form['new-username'].value,
+                password: form['new-password'].value,
+                fullName: form['new-fullname'].value,
+                role: form['new-role'].value,
+                email: form['new-email'].value,
+            };
+            
+            const data = await callApi('addUser', payload);
+            if (data !== null) {
+                showModal('เพิ่มผู้ใช้ใหม่สำเร็จ!', 'สำเร็จ');
+                form.reset();
+                await loadUserList(); // Refresh the list
+            }
         });
-        return obj;
-    });
-    cache.put(sheetName, JSON.stringify(objects), 300); 
-    return objects;
-}
 
-function invalidateCache(sheetName) {
-    CacheService.getScriptCache().remove(sheetName);
-}
-
-/**
- * [NEW FUNCTION] Creates a consistent, unique key for a grade record.
- * @param {string} studentId
- * @param {string} courseId
- * @param {string} assignmentId
- * @returns {string} A composite key (e.g., "student123-courseABC-assign456").
- */
-function createGradeCompositeKey(studentId, courseId, assignmentId) {
-    return `${studentId}-${courseId}-${assignmentId}`;
-}
-
-
-// --- API Function Implementations ---
-
-// --- User Management ---
-
-function handleLogin(username, password) {
-  if (!username || !password) return { success: false, message: 'กรุณากรอกชื่อผู้ใช้และรหัสผ่าน' };
-
-  const users = getSheetDataAsObjects(SHEET_USERS);
-  const user = users.find(u => u.Username === username);
-
-  if (user) {
-    const storedHash = user.PasswordHash;
-    const providedHash = hashPassword(password);
-    
-    if (storedHash === providedHash) {
-      const sheet = ss.getSheetByName(SHEET_USERS);
-      // Use TextFinder for better performance on large user sheets
-      const textFinder = sheet.getRange("B:B").createTextFinder(username).findNext();
-      if (textFinder) {
-          const userRowIndex = textFinder.getRow();
-          sheet.getRange(userRowIndex, 8).setValue(new Date()); // Column H is LastLogin
-      }
-
-      const userProfile = {
-        id: user.ID,
-        username: user.Username,
-        fullName: user.FullName,
-        role: user.Role,
-        email: user.Email
-      };
-      return { success: true, message: 'เข้าสู่ระบบสำเร็จ', data: userProfile };
-    }
-  }
-  return { success: false, message: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' };
-}
-
-function addUser(params) {
-  const { username, password, fullName, role, email } = params;
-  if (!username || !password || !fullName || !role) {
-    return { success: false, message: 'ข้อมูลไม่ครบถ้วน (ต้องการ: username, password, fullName, role)' };
-  }
-  const users = getSheetDataAsObjects(SHEET_USERS);
-  if (users.some(u => u.Username === username)) {
-    return { success: false, message: 'ชื่อผู้ใช้นี้มีอยู่ในระบบแล้ว' };
-  }
-  ss.getSheetByName(SHEET_USERS).appendRow([
-    Utilities.getUuid(), username, hashPassword(password), fullName, role,
-    email || '', new Date(), ''
-  ]);
-  invalidateCache(SHEET_USERS);
-  return { success: true, message: 'เพิ่มผู้ใช้สำเร็จ' };
-}
-
-function getUsers(role) {
-  let users = getSheetDataAsObjects(SHEET_USERS);
-  if (role) {
-    users = users.filter(u => u.Role === role);
-  }
-  users.forEach(u => delete u.PasswordHash);
-  return { success: true, message: 'ดึงข้อมูลผู้ใช้สำเร็จ', data: users };
-}
-
-// --- Course & Assignment Management ---
-
-function getCourses(teacherId) {
-  let courses = getSheetDataAsObjects(SHEET_COURSES);
-  if (teacherId) {
-    courses = courses.filter(c => c.TeacherID === teacherId);
-  }
-  return { success: true, message: 'ดึงข้อมูลวิชาสำเร็จ', data: courses };
-}
-
-function addCourse(params) {
-  const { courseCode, courseName, teacherId, term, year, description } = params;
-  if (!courseCode || !courseName || !teacherId || !term || !year) {
-    return { success: false, message: 'ข้อมูลไม่ครบถ้วน (ต้องการ: courseCode, courseName, teacherId, term, year)' };
-  }
-  ss.getSheetByName(SHEET_COURSES).appendRow([
-    Utilities.getUuid(), courseCode, courseName, teacherId,
-    description || '', term, year, new Date()
-  ]);
-  invalidateCache(SHEET_COURSES);
-  return { success: true, message: 'เพิ่มวิชาสำเร็จ' };
-}
-
-function getAssignments(courseId) {
-  if (!courseId) return { success: false, message: 'กรุณาระบุ Course ID' };
-  let assignments = getSheetDataAsObjects(SHEET_ASSIGNMENTS);
-  assignments = assignments.filter(a => a.CourseID === courseId);
-  return { success: true, message: 'ดึงข้อมูลงานที่สั่งสำเร็จ', data: assignments };
-}
-
-function addAssignment(params) {
-  const { courseId, title, maxScore, type, description, dueDate } = params;
-  if (!courseId || !title || !maxScore) {
-    return { success: false, message: 'ข้อมูลไม่ครบถ้วน (ต้องการ: courseId, title, maxScore)' };
-  }
-  ss.getSheetByName(SHEET_ASSIGNMENTS).appendRow([
-    Utilities.getUuid(), courseId, title, description || '',
-    type || 'assignment', parseFloat(maxScore), dueDate ? new Date(dueDate) : '', new Date()
-  ]);
-  invalidateCache(SHEET_ASSIGNMENTS);
-  return { success: true, message: 'เพิ่มงานที่สั่งสำเร็จ' };
-}
-
-// --- Grade Management ---
-
-/**
- * [CRITICAL FIX] Records or updates a grade.
- * Replaced the slow loop with a highly efficient TextFinder lookup on a composite key.
- * This prevents timeouts on large datasets.
- */
-function recordGrade(params) {
-  const { studentId, courseId, assignmentId, score, maxScore, recordedBy, comments } = params;
-  if (!studentId || !courseId || !assignmentId || score === undefined || !recordedBy) {
-     return { success: false, message: 'ข้อมูลไม่ครบถ้วน (ต้องการ: studentId, courseId, assignmentId, score, recordedBy)' };
-  }
-
-  const sheet = ss.getSheetByName(SHEET_GRADES);
-  const compositeKey = createGradeCompositeKey(studentId, courseId, assignmentId);
-  
-  // Use TextFinder on the CompositeKey column (Column B) for a massive performance boost.
-  const textFinder = sheet.getRange("B:B").createTextFinder(compositeKey).findNext();
-  
-  const now = new Date();
-  if (textFinder) {
-    // Update existing grade
-    const existingRowIndex = textFinder.getRow();
-    // Set values in one go for better performance
-    sheet.getRange(existingRowIndex, 6, 1, 4).setValues([[
-        parseFloat(score), recordedBy, now, comments || ''
-    ]]); // Columns: Score, RecordedBy, RecordedAt, Comments
-  } else {
-    // Add new grade
-    sheet.appendRow([
-      Utilities.getUuid(), compositeKey, studentId, courseId, assignmentId,
-      parseFloat(score), parseFloat(maxScore), recordedBy, now, comments || ''
-    ]);
-  }
-
-  invalidateCache(SHEET_GRADES);
-  return { success: true, message: textFinder ? 'อัปเดตคะแนนสำเร็จ' : 'บันทึกคะแนนสำเร็จ' };
-}
-
-function getStudentGrades(studentId, courseId) {
-    if (!studentId) return { success: false, message: 'กรุณาระบุ Student ID' };
-    const allGrades = getSheetDataAsObjects(SHEET_GRADES);
-    const allAssignments = getSheetDataAsObjects(SHEET_ASSIGNMENTS);
-    const assignmentMap = new Map(allAssignments.map(a => [a.AssignmentID, a]));
-    let studentGrades = allGrades.filter(g => g.StudentID === studentId);
-    if (courseId) {
-        studentGrades = studentGrades.filter(g => g.CourseID === courseId);
-    }
-    const result = studentGrades.map(grade => {
-        const assignment = assignmentMap.get(grade.AssignmentID) || {};
-        const score = parseFloat(grade.Score);
-        const maxScore = parseFloat(grade.MaxScore);
-        return {
-            ...grade,
-            assignmentTitle: assignment.Title || 'Unknown Assignment',
-            assignmentType: assignment.Type || 'assignment',
-            percentage: maxScore > 0 ? (score / maxScore) * 100 : 0
-        };
-    });
-    return { success: true, message: 'ดึงข้อมูลคะแนนนักเรียนสำเร็จ', data: result };
-}
-
-function getCourseGrades(courseId) {
-    if (!courseId) return { success: false, message: 'กรุณาระบุ Course ID' };
-    const courseGrades = getSheetDataAsObjects(SHEET_GRADES).filter(g => g.CourseID === courseId);
-    const courseAssignments = getSheetDataAsObjects(SHEET_ASSIGNMENTS).filter(a => a.CourseID === courseId);
-    const allUsers = getSheetDataAsObjects(SHEET_USERS);
-    const userMap = new Map(allUsers.map(u => [u.ID, u]));
-    const studentData = {};
-    courseGrades.forEach(grade => {
-        const studentId = grade.StudentID;
-        if (!studentData[studentId]) {
-            const studentInfo = userMap.get(studentId) || { FullName: 'Unknown Student' };
-            studentData[studentId] = {
-                studentId: studentId, studentName: studentInfo.FullName,
-                grades: {}, totalScore: 0, totalMaxScore: 0
-            };
+        // --- Dashboard & Courses ---
+        function showDashboard() {
+            document.getElementById('header-title').textContent = 'Dashboard';
+            adminContent.classList.add('hidden');
+            dashboardContent.classList.remove('hidden');
+            document.getElementById('dashboard-button').classList.add('hidden');
+            if (currentUser.role === 'admin') {
+                document.getElementById('admin-panel-button').classList.remove('hidden');
+            }
+            loadCoursesForCurrentUser();
         }
-        const score = parseFloat(grade.Score);
-        const maxScore = parseFloat(grade.MaxScore);
-        studentData[studentId].grades[grade.AssignmentID] = { score, maxScore };
-        studentData[studentId].totalScore += score;
-        studentData[studentId].totalMaxScore += maxScore;
-    });
-    const students = Object.values(studentData).map(student => ({
-        ...student,
-        totalPercentage: student.totalMaxScore > 0 ? (student.totalScore / student.totalMaxScore) * 100 : 0
-    }));
-    const result = {
-        assignments: courseAssignments.map(a => ({ id: a.AssignmentID, title: a.Title, maxScore: a.MaxScore })),
-        students: students
-    };
-    return { success: true, message: 'ดึงข้อมูลคะแนนของวิชาสำเร็จ', data: result };
-}
 
-// --- Reporting Functions ---
-
-function generateReport(params) {
-  const { reportType, courseId, studentId } = params;
-  let reportData;
-  switch (reportType) {
-    case 'coursePerformance':
-      if (!courseId) return { success: false, message: 'ต้องการ Course ID สำหรับรายงานนี้' };
-      reportData = generateCoursePerformanceReport(courseId);
-      break;
-    case 'studentProgress':
-      if (!studentId) return { success: false, message: 'ต้องการ Student ID สำหรับรายงานนี้' };
-      reportData = generateStudentProgressReport(studentId);
-      break;
-    case 'classAverage':
-       if (!courseId) return { success: false, message: 'ต้องการ Course ID สำหรับรายงานนี้' };
-      reportData = generateClassAverageReport(courseId);
-      break;
-    default:
-      return { success: false, message: 'ประเภทของรายงานไม่ถูกต้อง' };
-  }
-  return { success: true, message: 'สร้างรายงานสำเร็จ', data: reportData };
-}
-
-function generateCoursePerformanceReport(courseId) {
-    const courseGradesResult = getCourseGrades(courseId);
-    if (!courseGradesResult.success || !courseGradesResult.data) return null;
-    const { assignments, students } = courseGradesResult.data;
-    const assignmentStats = {};
-    assignments.forEach(assignment => {
-        const scores = students.map(s => s.grades[assignment.id]?.score).filter(s => s !== undefined);
-        const totalScore = scores.reduce((sum, score) => sum + score, 0);
-        const count = scores.length;
-        assignmentStats[assignment.id] = {
-            title: assignment.title, maxScore: assignment.maxScore,
-            average: count > 0 ? totalScore / count : 0,
-            highest: count > 0 ? Math.max(...scores) : 0,
-            lowest: count > 0 ? Math.min(...scores) : 0,
-            submissionCount: count
-        };
-    });
-    const classAverage = students.length > 0 ? students.reduce((sum, s) => sum + s.totalPercentage, 0) / students.length : 0;
-    return { courseId, studentCount: students.length, classAverage, assignmentStats };
-}
-
-function generateStudentProgressReport(studentId) {
-    const allCourses = getSheetDataAsObjects(SHEET_COURSES);
-    const studentGrades = getSheetDataAsObjects(SHEET_GRADES).filter(g => g.StudentID === studentId);
-    const userInfo = getSheetDataAsObjects(SHEET_USERS).find(u => u.ID === studentId);
-    const gradesByCourse = {};
-    studentGrades.forEach(grade => {
-        const courseId = grade.CourseID;
-        if (!gradesByCourse[courseId]) {
-            const courseInfo = allCourses.find(c => c.CourseID === courseId) || {};
-            gradesByCourse[courseId] = {
-                courseId, courseName: courseInfo.CourseName || 'Unknown Course',
-                courseCode: courseInfo.CourseCode || '', totalScore: 0, totalMaxScore: 0
-            };
+        async function loadCoursesForCurrentUser() {
+            if (currentUser.role === 'teacher') {
+                const courses = await callApi('getCourses', { teacherId: currentUser.id });
+                displayCourses(courses);
+            } else {
+                 document.getElementById('courses-container').innerHTML = '<p>ไม่มีรายวิชาให้แสดงสำหรับบทบาทของคุณ</p>';
+            }
         }
-        gradesByCourse[courseId].totalScore += parseFloat(grade.Score);
-        gradesByCourse[courseId].totalMaxScore += parseFloat(grade.MaxScore);
-    });
-    let totalGradePoints = 0;
-    const courses = Object.values(gradesByCourse).map(course => {
-        const percentage = course.totalMaxScore > 0 ? (course.totalScore / course.totalMaxScore) * 100 : 0;
-        const { grade, gradePoint } = calculateGradeFromPercentage(percentage);
-        totalGradePoints += gradePoint;
-        return { ...course, percentage, grade, gradePoint };
-    });
-    const gpa = courses.length > 0 ? totalGradePoints / courses.length : 0;
-    return { studentId, studentName: userInfo ? userInfo.FullName : 'Unknown Student', gpa, courses };
-}
 
-function generateClassAverageReport(courseId) {
-    const courseGradesResult = getCourseGrades(courseId);
-    if (!courseGradesResult.success || !courseGradesResult.data) return null;
-    const { students } = courseGradesResult.data;
-    const gradeDistribution = { 'A': 0, 'B+': 0, 'B': 0, 'C+': 0, 'C': 0, 'D+': 0, 'D': 0, 'F': 0 };
-    students.forEach(student => {
-        const { grade } = calculateGradeFromPercentage(student.totalPercentage);
-        gradeDistribution[grade]++;
-    });
-    const classAverage = students.length > 0 ? students.reduce((sum, s) => sum + s.totalPercentage, 0) / students.length : 0;
-    const studentPercentages = students.map(s => s.totalPercentage);
-    return {
-        courseId, studentCount: students.length, classAverage, gradeDistribution,
-        highestScore: students.length > 0 ? Math.max(...studentPercentages) : 0,
-        lowestScore: students.length > 0 ? Math.min(...studentPercentages) : 0
-    };
-}
+        function displayCourses(courses) {
+            const container = document.getElementById('courses-container');
+            container.innerHTML = '';
+            if (!courses || courses.length === 0) {
+                container.innerHTML = '<p>ไม่พบรายวิชา</p>';
+                return;
+            }
+            courses.forEach(course => {
+                const card = document.createElement('div');
+                card.className = 'bg-gray-50 p-4 rounded-lg border hover:shadow-md hover:border-indigo-500 cursor-pointer transition';
+                card.innerHTML = `
+                    <h3 class="font-bold text-lg text-indigo-700">${course.CourseName}</h3>
+                    <p class="text-sm text-gray-600">${course.CourseCode} | เทอม ${course.Term}/${course.Year}</p>
+                `;
+                card.addEventListener('click', () => loadGradebook(course));
+                container.appendChild(card);
+            });
+        }
 
-function calculateGradeFromPercentage(percentage) {
-    if (percentage >= 80) return { grade: 'A', gradePoint: 4.0 };
-    if (percentage >= 75) return { grade: 'B+', gradePoint: 3.5 };
-    if (percentage >= 70) return { grade: 'B', gradePoint: 3.0 };
-    if (percentage >= 65) return { grade: 'C+', gradePoint: 2.5 };
-    if (percentage >= 60) return { grade: 'C', gradePoint: 2.0 };
-    if (percentage >= 55) return { grade: 'D+', gradePoint: 1.5 };
-    if (percentage >= 50) return { grade: 'D', gradePoint: 1.0 };
-    return { grade: 'F', gradePoint: 0.0 };
-}
+        // --- Gradebook Logic ---
+        async function loadGradebook(course) {
+            currentCourse = course;
+            document.getElementById('gradebook-container').style.display = 'block';
+            document.getElementById('gradebook-title').textContent = `ตารางคะแนน: ${course.CourseName}`;
+
+            const [gradeData, students] = await Promise.all([
+                callApi('getCourseGrades', { courseId: course.CourseID }),
+                callApi('getUsers', { role: 'student' })
+            ]);
+
+            if (!gradeData || !students) return;
+            renderGradebook(gradeData, students);
+        }
+
+        function renderGradebook(gradeData, allStudents) {
+            const head = document.getElementById('gradebook-head');
+            const body = document.getElementById('gradebook-body');
+            head.innerHTML = '';
+            body.innerHTML = '';
+
+            const headerRow = document.createElement('tr');
+            let headers = '<th class="p-2 text-left font-semibold">ชื่อ-สกุล</th>';
+            gradeData.assignments.forEach(a => {
+                headers += `<th class="p-2 text-center font-semibold">${a.title}<br><span class="font-normal text-xs">(${a.maxScore} คะแนน)</span></th>`;
+            });
+            headerRow.innerHTML = headers;
+            head.appendChild(headerRow);
+
+            gradeData.students.forEach(student => {
+                const row = document.createElement('tr');
+                let rowHtml = `<td class="p-2 font-medium">${student.studentName}</td>`;
+                gradeData.assignments.forEach(assignment => {
+                    const grade = student.grades[assignment.id];
+                    const score = grade ? grade.score : '';
+                    rowHtml += `
+                        <td class="p-2 text-center">
+                            <input type="number" 
+                                   class="grade-input"
+                                   value="${score}"
+                                   data-student-id="${student.studentId}"
+                                   data-assignment-id="${assignment.id}"
+                                   data-max-score="${assignment.maxScore}">
+                        </td>
+                    `;
+                });
+                row.innerHTML = rowHtml;
+                body.appendChild(row);
+            });
+
+            document.querySelectorAll('.grade-input').forEach(input => {
+                input.addEventListener('change', handleGradeChange);
+            });
+        }
+
+        async function handleGradeChange(event) {
+            const input = event.target;
+            const { studentId, assignmentId, maxScore } = input.dataset;
+            const score = input.value;
+
+            if (score !== '' && (parseFloat(score) < 0 || parseFloat(score) > parseFloat(maxScore))) {
+                showModal(`คะแนนต้องอยู่ระหว่าง 0 ถึง ${maxScore}`, 'ข้อมูลไม่ถูกต้อง');
+                input.focus();
+                input.select();
+                return;
+            }
+            
+            input.classList.add('saving');
+            input.classList.remove('saved');
+
+            const payload = {
+                studentId,
+                courseId: currentCourse.CourseID,
+                assignmentId,
+                score: score === '' ? 0 : parseFloat(score),
+                maxScore: parseFloat(maxScore),
+                recordedBy: currentUser.id
+            };
+
+            const data = await callApi('recordGrade', payload);
+
+            input.classList.remove('saving');
+            if (data) {
+                input.classList.add('saved');
+                setTimeout(() => input.classList.remove('saved'), 2000);
+            }
+        }
+        
+        // --- Event Listeners ---
+        document.getElementById('back-to-courses').addEventListener('click', () => {
+            document.getElementById('gradebook-container').style.display = 'none';
+            currentCourse = null;
+        });
+        
+        // [NEW] Event listeners for admin/dashboard switching
+        document.getElementById('admin-panel-button').addEventListener('click', showAdminPanel);
+        document.getElementById('dashboard-button').addEventListener('click', showDashboard);
+
+        // --- Start the App ---
+        document.addEventListener('DOMContentLoaded', () => {
+            // [FIX] I've removed the check that compares against a specific URL.
+            // The check for the placeholder 'YOUR_WEB_APP_URL_HERE' inside callApi is sufficient.
+            setupAuth();
+        });
+
+    </script>
+</body>
+</html>
