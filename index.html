@@ -1,0 +1,484 @@
+// ================================================================= //
+// Google Apps Script for Gradebook System (Complete & Improved)     //
+// -- Security, Performance, and Stability Enhancements by Gemini -- //
+// ================================================================= //
+
+// --- Global Variables & Constants ---
+// !! IMPORTANT: Replace with your actual Spreadsheet ID
+const SPREADSHEET_ID = '1eLYd5tY09SFOSJnJtpeVRtHcv3N9fByVP1cKxo-nrNc'; 
+// !! IMPORTANT: Set your own unique and secret key for password hashing
+const SECRET_KEY = 'iy9oLiumokk160925213203'; 
+
+// Sheet Names
+const SHEET_USERS = 'Users';
+const SHEET_COURSES = 'Courses';
+const SHEET_GRADES = 'Grades';
+const SHEET_ASSIGNMENTS = 'Assignments';
+
+// Global spreadsheet object to avoid re-opening
+let ss;
+
+// --- Web App Entry Points & Core Handlers ---
+
+/**
+ * Handles GET requests.
+ * @param {Object} e - The event parameter.
+ */
+function doGet(e) {
+  return handleRequest(e);
+}
+
+/**
+ * Handles POST requests.
+ * @param {Object} e - The event parameter.
+ */
+function doPost(e) {
+  try {
+    const postData = JSON.parse(e.postData.contents);
+    e.parameter = { ...e.parameter, ...postData };
+    return handleRequest(e);
+  } catch (err) {
+    return createResponse(false, 'Invalid JSON payload in request body.', null);
+  }
+}
+
+/**
+ * Main request handler that routes actions to the appropriate functions.
+ * @param {Object} e - The event parameter containing the action and other parameters.
+ */
+function handleRequest(e) {
+  const params = e.parameter;
+  const action = params.action;
+
+  if (!initialize()) {
+    return createResponse(false, 'Failed to initialize the system. Check Spreadsheet ID.', null);
+  }
+
+  try {
+    let result;
+    switch (action) {
+      // User Management
+      case 'login':           result = handleLogin(params.username, params.password); break;
+      case 'getUsers':        result = getUsers(params.role); break;
+      case 'addUser':         result = addUser(params); break;
+      
+      // Course Management
+      case 'getCourses':      result = getCourses(params.teacherId); break;
+      case 'addCourse':       result = addCourse(params); break;
+      
+      // Assignment Management
+      case 'getAssignments':  result = getAssignments(params.courseId); break;
+      case 'addAssignment':   result = addAssignment(params); break;
+      
+      // Grade Management
+      case 'recordGrade':     result = recordGrade(params); break;
+      case 'getStudentGrades':result = getStudentGrades(params.studentId, params.courseId); break;
+      case 'getCourseGrades': result = getCourseGrades(params.courseId); break;
+      
+      // Reporting
+      case 'generateReport':  result = generateReport(params); break;
+
+      default:
+        result = { success: false, message: 'Invalid action specified.' };
+    }
+    return createResponse(result.success, result.message, result.data);
+  } catch (error) {
+    Logger.log(`Error in handleRequest [Action: ${action}]: ${error.toString()}\n${error.stack}`);
+    return createResponse(false, 'An unexpected error occurred: ' + error.toString(), null);
+  }
+}
+
+// --- Initialization & Setup ---
+
+function initialize() {
+  try {
+    if (ss) return true;
+    ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    setupSheetHeaders();
+    return true;
+  } catch (error) {
+    Logger.log('Error initializing spreadsheet: ' + error.toString());
+    return false;
+  }
+}
+
+/**
+ * [MAJOR CHANGE] Creates sheets if they don't exist and sets up their headers.
+ * Added 'CompositeKey' to the Grades sheet for performance.
+ */
+function setupSheetHeaders() {
+  const sheetsToSetup = {
+    [SHEET_USERS]: ['ID', 'Username', 'PasswordHash', 'FullName', 'Role', 'Email', 'CreatedAt', 'LastLogin'],
+    [SHEET_COURSES]: ['CourseID', 'CourseCode', 'CourseName', 'TeacherID', 'Description', 'Term', 'Year', 'CreatedAt'],
+    // Added 'CompositeKey' as the second column for efficient lookups.
+    [SHEET_GRADES]: ['ID', 'CompositeKey', 'StudentID', 'CourseID', 'AssignmentID', 'Score', 'MaxScore', 'RecordedBy', 'RecordedAt', 'Comments'],
+    [SHEET_ASSIGNMENTS]: ['AssignmentID', 'CourseID', 'Title', 'Description', 'Type', 'MaxScore', 'DueDate', 'CreatedAt']
+  };
+
+  for (const sheetName in sheetsToSetup) {
+    let sheet = ss.getSheetByName(sheetName);
+    if (!sheet) {
+      sheet = ss.insertSheet(sheetName);
+    }
+    if (sheet.getLastRow() === 0) {
+      sheet.appendRow(sheetsToSetup[sheetName]);
+      sheet.setFrozenRows(1);
+    }
+  }
+}
+
+// --- Utility & Security Functions ---
+
+function createResponse(success, message, data = null) {
+  const response = { success, message, data, timestamp: new Date().toISOString() };
+  return ContentService.createTextOutput(JSON.stringify(response)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function hashPassword(password) {
+  if (!password || !SECRET_KEY || SECRET_KEY === 'YOUR_SUPER_SECRET_KEY_CHANGE_THIS') {
+     throw new Error("SECRET_KEY is not configured. Please set a strong secret key in the script.");
+  }
+  const toHash = password + SECRET_KEY;
+  const hashBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, toHash);
+  return hashBytes.map(byte => ('0' + (byte & 0xFF).toString(16)).slice(-2)).join('');
+}
+
+function getSheetDataAsObjects(sheetName) {
+    const cache = CacheService.getScriptCache();
+    const cachedData = cache.get(sheetName);
+    if (cachedData) {
+        return JSON.parse(cachedData);
+    }
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet || sheet.getLastRow() < 2) return [];
+    
+    const data = sheet.getDataRange().getValues();
+    const headers = data.shift();
+    const objects = data.map(row => {
+        const obj = {};
+        headers.forEach((header, index) => {
+            obj[header] = row[index];
+        });
+        return obj;
+    });
+    cache.put(sheetName, JSON.stringify(objects), 300); 
+    return objects;
+}
+
+function invalidateCache(sheetName) {
+    CacheService.getScriptCache().remove(sheetName);
+}
+
+/**
+ * [NEW FUNCTION] Creates a consistent, unique key for a grade record.
+ * @param {string} studentId
+ * @param {string} courseId
+ * @param {string} assignmentId
+ * @returns {string} A composite key (e.g., "student123-courseABC-assign456").
+ */
+function createGradeCompositeKey(studentId, courseId, assignmentId) {
+    return `${studentId}-${courseId}-${assignmentId}`;
+}
+
+
+// --- API Function Implementations ---
+
+// --- User Management ---
+
+function handleLogin(username, password) {
+  if (!username || !password) return { success: false, message: 'กรุณากรอกชื่อผู้ใช้และรหัสผ่าน' };
+
+  const users = getSheetDataAsObjects(SHEET_USERS);
+  const user = users.find(u => u.Username === username);
+
+  if (user) {
+    const storedHash = user.PasswordHash;
+    const providedHash = hashPassword(password);
+    
+    if (storedHash === providedHash) {
+      const sheet = ss.getSheetByName(SHEET_USERS);
+      // Use TextFinder for better performance on large user sheets
+      const textFinder = sheet.getRange("B:B").createTextFinder(username).findNext();
+      if (textFinder) {
+          const userRowIndex = textFinder.getRow();
+          sheet.getRange(userRowIndex, 8).setValue(new Date()); // Column H is LastLogin
+      }
+
+      const userProfile = {
+        id: user.ID,
+        username: user.Username,
+        fullName: user.FullName,
+        role: user.Role,
+        email: user.Email
+      };
+      return { success: true, message: 'เข้าสู่ระบบสำเร็จ', data: userProfile };
+    }
+  }
+  return { success: false, message: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' };
+}
+
+function addUser(params) {
+  const { username, password, fullName, role, email } = params;
+  if (!username || !password || !fullName || !role) {
+    return { success: false, message: 'ข้อมูลไม่ครบถ้วน (ต้องการ: username, password, fullName, role)' };
+  }
+  const users = getSheetDataAsObjects(SHEET_USERS);
+  if (users.some(u => u.Username === username)) {
+    return { success: false, message: 'ชื่อผู้ใช้นี้มีอยู่ในระบบแล้ว' };
+  }
+  ss.getSheetByName(SHEET_USERS).appendRow([
+    Utilities.getUuid(), username, hashPassword(password), fullName, role,
+    email || '', new Date(), ''
+  ]);
+  invalidateCache(SHEET_USERS);
+  return { success: true, message: 'เพิ่มผู้ใช้สำเร็จ' };
+}
+
+function getUsers(role) {
+  let users = getSheetDataAsObjects(SHEET_USERS);
+  if (role) {
+    users = users.filter(u => u.Role === role);
+  }
+  users.forEach(u => delete u.PasswordHash);
+  return { success: true, message: 'ดึงข้อมูลผู้ใช้สำเร็จ', data: users };
+}
+
+// --- Course & Assignment Management ---
+
+function getCourses(teacherId) {
+  let courses = getSheetDataAsObjects(SHEET_COURSES);
+  if (teacherId) {
+    courses = courses.filter(c => c.TeacherID === teacherId);
+  }
+  return { success: true, message: 'ดึงข้อมูลวิชาสำเร็จ', data: courses };
+}
+
+function addCourse(params) {
+  const { courseCode, courseName, teacherId, term, year, description } = params;
+  if (!courseCode || !courseName || !teacherId || !term || !year) {
+    return { success: false, message: 'ข้อมูลไม่ครบถ้วน (ต้องการ: courseCode, courseName, teacherId, term, year)' };
+  }
+  ss.getSheetByName(SHEET_COURSES).appendRow([
+    Utilities.getUuid(), courseCode, courseName, teacherId,
+    description || '', term, year, new Date()
+  ]);
+  invalidateCache(SHEET_COURSES);
+  return { success: true, message: 'เพิ่มวิชาสำเร็จ' };
+}
+
+function getAssignments(courseId) {
+  if (!courseId) return { success: false, message: 'กรุณาระบุ Course ID' };
+  let assignments = getSheetDataAsObjects(SHEET_ASSIGNMENTS);
+  assignments = assignments.filter(a => a.CourseID === courseId);
+  return { success: true, message: 'ดึงข้อมูลงานที่สั่งสำเร็จ', data: assignments };
+}
+
+function addAssignment(params) {
+  const { courseId, title, maxScore, type, description, dueDate } = params;
+  if (!courseId || !title || !maxScore) {
+    return { success: false, message: 'ข้อมูลไม่ครบถ้วน (ต้องการ: courseId, title, maxScore)' };
+  }
+  ss.getSheetByName(SHEET_ASSIGNMENTS).appendRow([
+    Utilities.getUuid(), courseId, title, description || '',
+    type || 'assignment', parseFloat(maxScore), dueDate ? new Date(dueDate) : '', new Date()
+  ]);
+  invalidateCache(SHEET_ASSIGNMENTS);
+  return { success: true, message: 'เพิ่มงานที่สั่งสำเร็จ' };
+}
+
+// --- Grade Management ---
+
+/**
+ * [CRITICAL FIX] Records or updates a grade.
+ * Replaced the slow loop with a highly efficient TextFinder lookup on a composite key.
+ * This prevents timeouts on large datasets.
+ */
+function recordGrade(params) {
+  const { studentId, courseId, assignmentId, score, maxScore, recordedBy, comments } = params;
+  if (!studentId || !courseId || !assignmentId || score === undefined || !recordedBy) {
+     return { success: false, message: 'ข้อมูลไม่ครบถ้วน (ต้องการ: studentId, courseId, assignmentId, score, recordedBy)' };
+  }
+
+  const sheet = ss.getSheetByName(SHEET_GRADES);
+  const compositeKey = createGradeCompositeKey(studentId, courseId, assignmentId);
+  
+  // Use TextFinder on the CompositeKey column (Column B) for a massive performance boost.
+  const textFinder = sheet.getRange("B:B").createTextFinder(compositeKey).findNext();
+  
+  const now = new Date();
+  if (textFinder) {
+    // Update existing grade
+    const existingRowIndex = textFinder.getRow();
+    // Set values in one go for better performance
+    sheet.getRange(existingRowIndex, 6, 1, 4).setValues([[
+        parseFloat(score), recordedBy, now, comments || ''
+    ]]); // Columns: Score, RecordedBy, RecordedAt, Comments
+  } else {
+    // Add new grade
+    sheet.appendRow([
+      Utilities.getUuid(), compositeKey, studentId, courseId, assignmentId,
+      parseFloat(score), parseFloat(maxScore), recordedBy, now, comments || ''
+    ]);
+  }
+
+  invalidateCache(SHEET_GRADES);
+  return { success: true, message: textFinder ? 'อัปเดตคะแนนสำเร็จ' : 'บันทึกคะแนนสำเร็จ' };
+}
+
+function getStudentGrades(studentId, courseId) {
+    if (!studentId) return { success: false, message: 'กรุณาระบุ Student ID' };
+    const allGrades = getSheetDataAsObjects(SHEET_GRADES);
+    const allAssignments = getSheetDataAsObjects(SHEET_ASSIGNMENTS);
+    const assignmentMap = new Map(allAssignments.map(a => [a.AssignmentID, a]));
+    let studentGrades = allGrades.filter(g => g.StudentID === studentId);
+    if (courseId) {
+        studentGrades = studentGrades.filter(g => g.CourseID === courseId);
+    }
+    const result = studentGrades.map(grade => {
+        const assignment = assignmentMap.get(grade.AssignmentID) || {};
+        const score = parseFloat(grade.Score);
+        const maxScore = parseFloat(grade.MaxScore);
+        return {
+            ...grade,
+            assignmentTitle: assignment.Title || 'Unknown Assignment',
+            assignmentType: assignment.Type || 'assignment',
+            percentage: maxScore > 0 ? (score / maxScore) * 100 : 0
+        };
+    });
+    return { success: true, message: 'ดึงข้อมูลคะแนนนักเรียนสำเร็จ', data: result };
+}
+
+function getCourseGrades(courseId) {
+    if (!courseId) return { success: false, message: 'กรุณาระบุ Course ID' };
+    const courseGrades = getSheetDataAsObjects(SHEET_GRADES).filter(g => g.CourseID === courseId);
+    const courseAssignments = getSheetDataAsObjects(SHEET_ASSIGNMENTS).filter(a => a.CourseID === courseId);
+    const allUsers = getSheetDataAsObjects(SHEET_USERS);
+    const userMap = new Map(allUsers.map(u => [u.ID, u]));
+    const studentData = {};
+    courseGrades.forEach(grade => {
+        const studentId = grade.StudentID;
+        if (!studentData[studentId]) {
+            const studentInfo = userMap.get(studentId) || { FullName: 'Unknown Student' };
+            studentData[studentId] = {
+                studentId: studentId, studentName: studentInfo.FullName,
+                grades: {}, totalScore: 0, totalMaxScore: 0
+            };
+        }
+        const score = parseFloat(grade.Score);
+        const maxScore = parseFloat(grade.MaxScore);
+        studentData[studentId].grades[grade.AssignmentID] = { score, maxScore };
+        studentData[studentId].totalScore += score;
+        studentData[studentId].totalMaxScore += maxScore;
+    });
+    const students = Object.values(studentData).map(student => ({
+        ...student,
+        totalPercentage: student.totalMaxScore > 0 ? (student.totalScore / student.totalMaxScore) * 100 : 0
+    }));
+    const result = {
+        assignments: courseAssignments.map(a => ({ id: a.AssignmentID, title: a.Title, maxScore: a.MaxScore })),
+        students: students
+    };
+    return { success: true, message: 'ดึงข้อมูลคะแนนของวิชาสำเร็จ', data: result };
+}
+
+// --- Reporting Functions ---
+
+function generateReport(params) {
+  const { reportType, courseId, studentId } = params;
+  let reportData;
+  switch (reportType) {
+    case 'coursePerformance':
+      if (!courseId) return { success: false, message: 'ต้องการ Course ID สำหรับรายงานนี้' };
+      reportData = generateCoursePerformanceReport(courseId);
+      break;
+    case 'studentProgress':
+      if (!studentId) return { success: false, message: 'ต้องการ Student ID สำหรับรายงานนี้' };
+      reportData = generateStudentProgressReport(studentId);
+      break;
+    case 'classAverage':
+       if (!courseId) return { success: false, message: 'ต้องการ Course ID สำหรับรายงานนี้' };
+      reportData = generateClassAverageReport(courseId);
+      break;
+    default:
+      return { success: false, message: 'ประเภทของรายงานไม่ถูกต้อง' };
+  }
+  return { success: true, message: 'สร้างรายงานสำเร็จ', data: reportData };
+}
+
+function generateCoursePerformanceReport(courseId) {
+    const courseGradesResult = getCourseGrades(courseId);
+    if (!courseGradesResult.success || !courseGradesResult.data) return null;
+    const { assignments, students } = courseGradesResult.data;
+    const assignmentStats = {};
+    assignments.forEach(assignment => {
+        const scores = students.map(s => s.grades[assignment.id]?.score).filter(s => s !== undefined);
+        const totalScore = scores.reduce((sum, score) => sum + score, 0);
+        const count = scores.length;
+        assignmentStats[assignment.id] = {
+            title: assignment.title, maxScore: assignment.maxScore,
+            average: count > 0 ? totalScore / count : 0,
+            highest: count > 0 ? Math.max(...scores) : 0,
+            lowest: count > 0 ? Math.min(...scores) : 0,
+            submissionCount: count
+        };
+    });
+    const classAverage = students.length > 0 ? students.reduce((sum, s) => sum + s.totalPercentage, 0) / students.length : 0;
+    return { courseId, studentCount: students.length, classAverage, assignmentStats };
+}
+
+function generateStudentProgressReport(studentId) {
+    const allCourses = getSheetDataAsObjects(SHEET_COURSES);
+    const studentGrades = getSheetDataAsObjects(SHEET_GRADES).filter(g => g.StudentID === studentId);
+    const userInfo = getSheetDataAsObjects(SHEET_USERS).find(u => u.ID === studentId);
+    const gradesByCourse = {};
+    studentGrades.forEach(grade => {
+        const courseId = grade.CourseID;
+        if (!gradesByCourse[courseId]) {
+            const courseInfo = allCourses.find(c => c.CourseID === courseId) || {};
+            gradesByCourse[courseId] = {
+                courseId, courseName: courseInfo.CourseName || 'Unknown Course',
+                courseCode: courseInfo.CourseCode || '', totalScore: 0, totalMaxScore: 0
+            };
+        }
+        gradesByCourse[courseId].totalScore += parseFloat(grade.Score);
+        gradesByCourse[courseId].totalMaxScore += parseFloat(grade.MaxScore);
+    });
+    let totalGradePoints = 0;
+    const courses = Object.values(gradesByCourse).map(course => {
+        const percentage = course.totalMaxScore > 0 ? (course.totalScore / course.totalMaxScore) * 100 : 0;
+        const { grade, gradePoint } = calculateGradeFromPercentage(percentage);
+        totalGradePoints += gradePoint;
+        return { ...course, percentage, grade, gradePoint };
+    });
+    const gpa = courses.length > 0 ? totalGradePoints / courses.length : 0;
+    return { studentId, studentName: userInfo ? userInfo.FullName : 'Unknown Student', gpa, courses };
+}
+
+function generateClassAverageReport(courseId) {
+    const courseGradesResult = getCourseGrades(courseId);
+    if (!courseGradesResult.success || !courseGradesResult.data) return null;
+    const { students } = courseGradesResult.data;
+    const gradeDistribution = { 'A': 0, 'B+': 0, 'B': 0, 'C+': 0, 'C': 0, 'D+': 0, 'D': 0, 'F': 0 };
+    students.forEach(student => {
+        const { grade } = calculateGradeFromPercentage(student.totalPercentage);
+        gradeDistribution[grade]++;
+    });
+    const classAverage = students.length > 0 ? students.reduce((sum, s) => sum + s.totalPercentage, 0) / students.length : 0;
+    const studentPercentages = students.map(s => s.totalPercentage);
+    return {
+        courseId, studentCount: students.length, classAverage, gradeDistribution,
+        highestScore: students.length > 0 ? Math.max(...studentPercentages) : 0,
+        lowestScore: students.length > 0 ? Math.min(...studentPercentages) : 0
+    };
+}
+
+function calculateGradeFromPercentage(percentage) {
+    if (percentage >= 80) return { grade: 'A', gradePoint: 4.0 };
+    if (percentage >= 75) return { grade: 'B+', gradePoint: 3.5 };
+    if (percentage >= 70) return { grade: 'B', gradePoint: 3.0 };
+    if (percentage >= 65) return { grade: 'C+', gradePoint: 2.5 };
+    if (percentage >= 60) return { grade: 'C', gradePoint: 2.0 };
+    if (percentage >= 55) return { grade: 'D+', gradePoint: 1.5 };
+    if (percentage >= 50) return { grade: 'D', gradePoint: 1.0 };
+    return { grade: 'F', gradePoint: 0.0 };
+}
